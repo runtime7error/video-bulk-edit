@@ -58,10 +58,37 @@ def auth(creds: Optional[HTTPBasicCredentials] = Depends(security)):
         raise HTTPException(401, "Senha incorreta", headers={"WWW-Authenticate": 'Basic realm="Auto Cutter"'})
 
 
+import json
+
 # ---------------- Jobs ----------------
 jobs: dict[str, dict] = {}
 jobs_lock = threading.Lock()
 work_queue: "queue.Queue[str]" = queue.Queue()
+
+
+def _save_job_disk(job: dict):
+    try:
+        p = Path(job["dir"]) / "job.json"
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump(job, fh)
+    except Exception:
+        pass
+
+
+def _load_jobs_disk():
+    if not DATA_DIR.exists():
+        return
+    for d in DATA_DIR.iterdir():
+        if d.is_dir() and (d / "job.json").exists():
+            try:
+                with open(d / "job.json", "r", encoding="utf-8") as fh:
+                    j = json.load(fh)
+                    jobs[j["id"]] = j
+            except Exception:
+                pass
+
+
+_load_jobs_disk()
 
 
 def _safe_name(name: str) -> str:
@@ -95,11 +122,13 @@ def worker():
         if not job:
             continue
         job["status"] = "processing"
+        _save_job_disk(job)
         s = job["settings"]
         for f in job["files"]:
             if f["status"] != "queued":
                 continue
             f["status"] = "processing"
+            _save_job_disk(job)
 
             def prog(p: float, f=f):
                 f["progress"] = round(p, 4)
@@ -115,11 +144,13 @@ def worker():
                 f["status"] = "error"
                 f["error"] = str(e)[:500]
             finally:
+                _save_job_disk(job)
                 try:
                     os.remove(f["src"])  # libera disco
                 except OSError:
                     pass
         job["status"] = "done"
+        _save_job_disk(job)
 
 
 def janitor():

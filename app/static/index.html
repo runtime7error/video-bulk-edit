@@ -169,19 +169,47 @@ function showJob(job) {
   $('#expire').textContent = job.status === 'done' ? `Os arquivos ficam disponíveis por mais ${Math.ceil(job.expires_in/60)} min.` : 'Pode bloquear a tela — o processamento continua no servidor.';
 }
 
+let wakeLock = null;
+async function requestWakeLock() {
+  try {
+    if ('wakeLock' in navigator && !wakeLock) {
+      wakeLock = await navigator.wakeLock.request('screen');
+    }
+  } catch {}
+}
+function releaseWakeLock() {
+  if (wakeLock) {
+    try { wakeLock.release(); } catch {}
+    wakeLock = null;
+  }
+}
+
 async function poll() {
   clearTimeout(timer);
   if (!jobId) return;
   try {
     const r = await fetch(`/api/jobs/${jobId}`);
-    if (r.status === 404) { reset(); return; }
+    if (r.status === 404) {
+      releaseWakeLock();
+      alert('O servidor foi reiniciado ou o processamento expirou. Por favor, tente enviar novamente.');
+      reset();
+      return;
+    }
     const job = await r.json();
     showJob(job);
-    if (job.status !== 'done') timer = setTimeout(poll, 1500);
-  } catch { timer = setTimeout(poll, 4000); }
+    if (job.status !== 'done') {
+      requestWakeLock();
+      timer = setTimeout(poll, 1500);
+    } else {
+      releaseWakeLock();
+    }
+  } catch {
+    timer = setTimeout(poll, 4000);
+  }
 }
 
 function reset() {
+  releaseWakeLock();
   clearTimeout(timer); jobId = null; localStorage.removeItem('jobId');
   $('#job-card').classList.add('hidden'); $('#upload-card').classList.remove('hidden');
   input.value = ''; setFiles([]);
