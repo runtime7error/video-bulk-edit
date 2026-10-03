@@ -1,0 +1,10 @@
+entrada/
+saida/
+ffmpeg/
+.venv/
+__pycache__/
+*.pyc
+*.mp4
+*.mov
+*.mkv
+*.zip

@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111318">
+<title>Auto Cutter</title>
+<style>
+  :root { --bg:#111318; --card:#1b1e26; --line:#2a2f3a; --txt:#e8eaf0; --mut:#9aa1b2; --acc:#6c8cff; --ok:#3ecf8e; --err:#ff6b6b; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--txt);
+         padding:16px; padding-bottom:calc(16px + env(safe-area-inset-bottom)); }
+  main { max-width:640px; margin:0 auto; display:flex; flex-direction:column; gap:14px; }
+  h1 { font-size:1.4rem; margin:4px 0 0; }
+  p.sub { margin:0; color:var(--mut); font-size:.9rem; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; }
+  .drop { border:2px dashed var(--line); border-radius:12px; padding:26px 12px; text-align:center; cursor:pointer; color:var(--mut); }
+  .drop.over { border-color:var(--acc); color:var(--txt); }
+  .drop strong { color:var(--txt); display:block; font-size:1.05rem; margin-bottom:4px; }
+  input[type=file] { display:none; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:12px; }
+  .grid .full { grid-column:1/-1; }
+  label { font-size:.8rem; color:var(--mut); display:flex; flex-direction:column; gap:4px; }
+  input[type=number], select { background:#0e1015; color:var(--txt); border:1px solid var(--line); border-radius:8px; padding:10px; font-size:1rem; }
+  button { width:100%; border:0; border-radius:10px; padding:14px; font-size:1rem; font-weight:600; background:var(--acc); color:#fff; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  button.sec { background:transparent; border:1px solid var(--line); color:var(--txt); }
+  ul.files { list-style:none; margin:10px 0 0; padding:0; display:flex; flex-direction:column; gap:6px; font-size:.88rem; }
+  ul.files li { display:flex; justify-content:space-between; gap:8px; color:var(--mut); }
+  ul.files li span:first-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--txt); }
+  .item { padding:10px 0; border-top:1px solid var(--line); }
+  .item:first-child { border-top:0; padding-top:0; }
+  .row { display:flex; justify-content:space-between; align-items:center; gap:10px; }
+  .name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:.92rem; }
+  .st { font-size:.8rem; color:var(--mut); white-space:nowrap; }
+  .st.ok { color:var(--ok); } .st.err { color:var(--err); }
+  .bar { height:6px; background:#0e1015; border-radius:4px; overflow:hidden; margin-top:6px; }
+  .bar > i { display:block; height:100%; width:0; background:var(--acc); transition:width .4s; }
+  .bar.ok > i { background:var(--ok); }
+  a.dl { color:var(--acc); font-size:.85rem; text-decoration:none; font-weight:600; white-space:nowrap; }
+  .err-msg { color:var(--err); font-size:.8rem; margin-top:4px; word-break:break-word; }
+  .hidden { display:none !important; }
+  .stack { display:flex; flex-direction:column; gap:8px; margin-top:12px; }
+  .note { color:var(--mut); font-size:.8rem; text-align:center; }
+</style>
+</head>
+<body>
+<main>
+  <div>
+    <h1>✂️ Auto Cutter</h1>
+    <p class="sub">Espelha o vídeo, corta em trechos e junta com crossfade.</p>
+  </div>
+
+  <section class="card" id="upload-card">
+    <div class="drop" id="drop">
+      <strong>Toque para escolher vídeos</strong>
+      ou arraste aqui (vários de uma vez)
+    </div>
+    <input type="file" id="file" accept="video/*" multiple>
+    <ul class="files" id="picked"></ul>
+
+    <div class="grid">
+      <label>Trecho (s)<input type="number" id="segmento" value="5" min="1" max="60" step="0.5"></label>
+      <label>Fade (s)<input type="number" id="fade" value="0.5" min="0.1" max="5" step="0.1"></label>
+      <label class="full">Transição<select id="transicao"></select></label>
+    </div>
+    <div class="stack">
+      <button id="send" disabled>Processar</button>
+      <div class="bar hidden" id="upbar"><i></i></div>
+      <div class="note hidden" id="upnote"></div>
+    </div>
+  </section>
+
+  <section class="card hidden" id="job-card">
+    <div class="row" style="margin-bottom:10px">
+      <strong id="job-title">Processando</strong>
+      <span class="st" id="job-sub"></span>
+    </div>
+    <div id="items"></div>
+    <div class="stack">
+      <button id="zip" class="hidden">Baixar todos (ZIP)</button>
+      <button id="new" class="sec">Novo lote</button>
+      <div class="note" id="expire"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const fmtMB = b => (b / 1048576).toFixed(1) + ' MB';
+const fmtS = s => s >= 60 ? `${Math.floor(s/60)}m${String(Math.round(s%60)).padStart(2,'0')}s` : `${s.toFixed(1)}s`;
+let picked = [], jobId = localStorage.getItem('jobId'), timer = null, cfg = { max_upload_mb: 500 };
+
+fetch('/api/config').then(r => r.json()).then(c => {
+  cfg = c;
+  $('#transicao').innerHTML = c.transitions.map(t => `<option ${t==='fade'?'selected':''}>${t}</option>`).join('');
+});
+
+const drop = $('#drop'), input = $('#file');
+drop.onclick = () => input.click();
+input.onchange = () => setFiles([...input.files]);
+['dragenter','dragover'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add('over'); }));
+['dragleave','drop'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', ev => setFiles([...ev.dataTransfer.files].filter(f => f.type.startsWith('video/') || /\.(mp4|mov|mkv|avi|webm|m4v)$/i.test(f.name))));
+
+function setFiles(list) {
+  picked = list;
+  $('#picked').innerHTML = list.map(f => `<li><span>${esc(f.name)}</span><span>${fmtMB(f.size)}</span></li>`).join('');
+  $('#send').disabled = !list.length;
+}
+const esc = s => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+$('#send').onclick = () => {
+  const big = picked.find(f => f.size > cfg.max_upload_mb * 1048576);
+  if (big) return alert(`${big.name} passa do limite de ${cfg.max_upload_mb} MB`);
+  const fd = new FormData();
+  picked.forEach(f => fd.append('files', f, f.name));
+  fd.append('segmento', $('#segmento').value);
+  fd.append('fade', $('#fade').value);
+  fd.append('transicao', $('#transicao').value);
+
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/jobs');
+  $('#send').disabled = true;
+  $('#upbar').classList.remove('hidden'); $('#upnote').classList.remove('hidden');
+  xhr.upload.onprogress = e => {
+    if (!e.lengthComputable) return;
+    const p = e.loaded / e.total;
+    $('#upbar i').style.width = (p * 100) + '%';
+    $('#upnote').textContent = p < 1 ? `Enviando… ${Math.round(p*100)}% (${fmtMB(e.loaded)} de ${fmtMB(e.total)})` : 'Salvando no servidor…';
+  };
+  xhr.onload = () => {
+    $('#upbar').classList.add('hidden'); $('#upnote').classList.add('hidden');
+    if (xhr.status >= 200 && xhr.status < 300) {
+      const job = JSON.parse(xhr.responseText);
+      jobId = job.id; localStorage.setItem('jobId', jobId);
+      showJob(job); poll();
+    } else {
+      let msg = xhr.statusText; try { msg = JSON.parse(xhr.responseText).detail; } catch {}
+      alert('Erro: ' + msg); $('#send').disabled = false;
+    }
+  };
+  xhr.onerror = () => { alert('Falha na conexão durante o envio.'); $('#send').disabled = false;
+    $('#upbar').classList.add('hidden'); $('#upnote').classList.add('hidden'); };
+  xhr.send(fd);
+};
+
+function showJob(job) {
+  $('#upload-card').classList.add('hidden');
+  $('#job-card').classList.remove('hidden');
+  const done = job.files.filter(f => f.status === 'done').length;
+  const titles = { queued: 'Na fila', processing: 'Processando', done: 'Concluído' };
+  $('#job-title').textContent = titles[job.status] || job.status;
+  $('#job-sub').textContent = job.status === 'queued' && job.queue_position > 1
+    ? `posição ${job.queue_position} na fila` : `${done}/${job.files.length} prontos`;
+  $('#items').innerHTML = job.files.map((f, i) => {
+    const pct = Math.round(f.progress * 100);
+    const st = { queued: ['aguardando', ''], processing: [`${pct}%`, ''], done: ['pronto', 'ok'], error: ['erro', 'err'] }[f.status];
+    const info = f.info ? ` · ${f.info.segments} trechos · ${fmtS(f.info.duration_out)}` : '';
+    return `<div class="item">
+      <div class="row"><span class="name">${esc(f.name)}</span>
+        ${f.status === 'done' ? `<a class="dl" href="/api/jobs/${job.id}/files/${i}" download>Baixar</a>` : `<span class="st ${st[1]}">${st[0]}</span>`}
+      </div>
+      ${f.status === 'done' ? `<div class="st ok">pronto${info}</div>` : ''}
+      ${f.status === 'error' ? `<div class="err-msg">${esc(f.error || '')}</div>` : `<div class="bar ${f.status==='done'?'ok':''}"><i style="width:${f.status==='done'?100:pct}%"></i></div>`}
+    </div>`;
+  }).join('');
+  $('#zip').classList.toggle('hidden', done < 2);
+  $('#expire').textContent = job.status === 'done' ? `Os arquivos ficam disponíveis por mais ${Math.ceil(job.expires_in/60)} min.` : 'Pode bloquear a tela — o processamento continua no servidor.';
+}
+
+async function poll() {
+  clearTimeout(timer);
+  if (!jobId) return;
+  try {
+    const r = await fetch(`/api/jobs/${jobId}`);
+    if (r.status === 404) { reset(); return; }
+    const job = await r.json();
+    showJob(job);
+    if (job.status !== 'done') timer = setTimeout(poll, 1500);
+  } catch { timer = setTimeout(poll, 4000); }
+}
+
+function reset() {
+  clearTimeout(timer); jobId = null; localStorage.removeItem('jobId');
+  $('#job-card').classList.add('hidden'); $('#upload-card').classList.remove('hidden');
+  input.value = ''; setFiles([]);
+}
+
+$('#zip').onclick = () => { location.href = `/api/jobs/${jobId}/zip`; };
+$('#new').onclick = reset;
+if (jobId) poll();
+</script>
+</body>
+</html>
